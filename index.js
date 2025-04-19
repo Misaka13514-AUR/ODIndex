@@ -10,7 +10,7 @@ const config = {
     /**
      * The base path for indexing, all files and subfolders are public by this tool. For example `/Share`.
      */
-    base: "/Share",
+    base: "/aur",
     /**
      * Feature Caching
      * Enable Cloudflare cache for path pattern listed below.
@@ -199,8 +199,8 @@ async function getAccessToken() {
  */
 function mime2icon(type) {
     if (type.startsWith("image")) return "image";
-    if (type.startsWith("image")) return "video_label";
-    if (type.startsWith("image")) return "audiotrack";
+    if (type.startsWith("video")) return "video_label";
+    if (type.startsWith("audio")) return "audiotrack";
     return "description";
 }
 
@@ -307,6 +307,21 @@ function wrap_pathname(pathname) {
     return (pathname === "/" || pathname === "") ? "" : ":" + pathname;
 }
 
+/**
+ * Handle `If-Modified-Since` requests.
+ * Return 304 if the file hasn't been modified since the given date.
+ */
+async function handleIfModifiedSince(request, fileLastModified) {
+    const ifModifiedSince = request.headers.get('If-Modified-Since');
+    if (ifModifiedSince) {
+        const ifModifiedDate = new Date(ifModifiedSince);
+        const fileModifiedDate = new Date(fileLastModified);
+        if (fileModifiedDate <= ifModifiedDate) {
+            return new Response(null, { status: 304 });
+        }
+    }
+    return null;
+}
 
 async function handleRequest(request) {
 
@@ -341,7 +356,10 @@ async function handleRequest(request) {
 
     }
 
-    const url = `https://graph.microsoft.com/v1.0/me/drive/root${ wrap_pathname(pathname) }?select=name,eTag,size,id,folder,file,%40microsoft.graph.downloadUrl&expand=children(select%3Dname,eTag,size,id,folder,file)`;
+    // Handle the colon replacement
+    const encodedPathname = pathname.replace(/:/g, '：');  // Replace English colon with Chinese colon for backend request
+    const url = `https://graph.microsoft.com/v1.0/me/drive/root${ wrap_pathname(encodedPathname) }?select=name,eTag,size,id,folder,file,lastModifiedDateTime,%40microsoft.graph.downloadUrl&expand=children(select%3Dname,eTag,size,id,folder,file,lastModifiedDateTime)`;
+
     const resp = await fetch(url, {
         headers: {
             "Authorization": `bearer ${accessToken}`
@@ -351,6 +369,11 @@ async function handleRequest(request) {
     if (resp.ok) {
         const data = await resp.json();
         if ("file" in data) {
+            const lastModifiedDateTime = data.lastModifiedDateTime;
+        
+            const modifiedResponse = await handleIfModifiedSince(request, lastModifiedDateTime);
+            if (modifiedResponse) return modifiedResponse;
+        
             return await handleFile(request, pathname, data["@microsoft.graph.downloadUrl"], {
                 proxied,
                 fileSize: data["size"]
@@ -413,15 +436,25 @@ function renderFolderIndex(items, isIndex) {
     const nav = `<nav><a class="brand">OneDrive Index</a></nav>`;
     const el = (tag, attrs, content) => `<${tag} ${attrs.join(" ")}>${content}</${tag}>`;
     const div = (className, content) => el("div", [`class=${className}`], content);
-    const item = (icon, filename, size) => el("a", [`href="${filename}"`, `class="item"`, size ? `size="${size}"` : ""], el("i", [`class="material-icons"`], icon) + filename)
+    const item = (icon, filename, size) => {
+        // Handle colon replacement in href
+        let encodedFilename = filename.replace(/：/g, ':'); // Replace Chinese colon with English colon for links
+        let href = `./${encodedFilename}`;  // Add prefix to href for correct link
+
+        return el("a", [`href="${href}"`, `class="item"`, size ? `size="${size}"` : ""], 
+            el("i", [`class="material-icons"`], icon) + filename);
+    }
 
     return renderHTML(nav + div("container", div("items", el("div", ['style="min-width:600px"'],
-        (!isIndex ? item("folder", "..") : "") +
-        items.map((i) => {
+        (!isIndex ? item("folder", "..") : "") + items.map((i) => {
+            let filename = i.name;
+            // Replace Chinese colon with English colon in file listing
+            filename = filename.replace(/：/g, ':');
+            
             if ("folder" in i) {
-                return item("folder", i.name, i.size)
+                return item("folder", filename, i.size)
             } else if ("file" in i) {
-                return item(mime2icon(i.file.mimeType), i.name, i.size)
+                return item(mime2icon(i.file.mimeType), filename, i.size)
             } else console.log(`unknown item type ${i}`)
         }).join("")
     ))));
